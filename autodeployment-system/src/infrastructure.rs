@@ -299,7 +299,8 @@ pub async fn provision_infrastructure(
     let url = if output.status.success() {
         if let Ok(outputs) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
             outputs
-                .get("public_ip")
+                .get("instance_ip")
+                .or_else(|| outputs.get("public_ip"))
                 .or_else(|| outputs.get("public_dns"))
                 .or_else(|| outputs.get("website_url"))
                 .and_then(|v| v.get("value"))
@@ -316,7 +317,8 @@ pub async fn provision_infrastructure(
     let public_ip = if output.status.success() {
         if let Ok(outputs) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
             outputs
-                .get("public_ip")
+                .get("instance_ip")
+                .or_else(|| outputs.get("public_ip"))
                 .and_then(|v| v.get("value"))
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string())

@@ -1,7 +1,10 @@
 use anyhow::{Result, anyhow};
 use log::{info, warn, error};
 use std::io::{self, Write};
+use std::fs;
+use std::path::Path;
 use tempfile::TempDir;
+use walkdir::WalkDir;
 
 use crate::ai_nlp;
 use crate::repository::{clone_repository, analyze_repository, RepositoryAnalysis};
@@ -106,13 +109,30 @@ pub async fn deploy_application(
     // Provision infrastructure
     info!("☁️ Provisioning infrastructure...");
     let work_dir = tempfile::tempdir()?;
-    let deployment_result = provision_infrastructure(
+    let mut deployment_result = provision_infrastructure(
         &infrastructure_decision,
         repository,
         work_dir.path(),
         false, // Actually deploy
         &requirements.cloud_provider,
     ).await?;
+    
+    // Replace localhost with actual IP in the deployment result
+    if let Some(public_ip) = &deployment_result.public_ip {
+        if deployment_result.url.contains("unknown") {
+            deployment_result.url = format!("http://{}:5000", public_ip);
+        }
+        
+        // Clone repository again and replace localhost references
+        info!("📥 Re-cloning repository to update localhost references...");
+        if let Ok(temp_repo) = clone_repository(repository).await {
+            if let Err(e) = replace_localhost_in_repository(temp_repo.path(), public_ip) {
+                warn!("⚠️ Failed to replace localhost references: {}", e);
+            } else {
+                info!("✅ Successfully updated localhost references in repository files");
+            }
+        }
+    }
     
     info!("✅ Deployment completed successfully!");
     info!("🌐 Application URL: {}", deployment_result.url);
@@ -346,4 +366,60 @@ fn print_deployment_plan(decision: &InfrastructureDecision) {
             println!("  - {}: {}", var_name, description);
         }
     }
+}
+
+/// Replace localhost references in repository files with the actual public IP
+fn replace_localhost_in_repository(repo_path: &Path, public_ip: &str) -> Result<()> {
+    info!("🔄 Replacing localhost references with {} in repository files", public_ip);
+    
+    // Common file extensions that might contain localhost references
+    let extensions = &[".py", ".js", ".ts", ".html", ".css", ".json", ".yaml", ".yml", ".toml", ".cfg", ".ini"];
+    
+    // Find all relevant files
+    for entry in WalkDir::new(repo_path)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+        if path.is_file() {
+            if let Some(ext) = path.extension() {
+                if extensions.iter().any(|&e| e.trim_start_matches('.') == ext.to_string_lossy()) {
+                    replace_localhost_in_file(path, public_ip)?;
+                }
+            }
+        }
+    }
+    
+    Ok(())
+}
+
+/// Replace localhost references in a single file
+fn replace_localhost_in_file(file_path: &Path, public_ip: &str) -> Result<()> {
+    if let Ok(content) = fs::read_to_string(file_path) {
+        let original_content = content.clone();
+        
+        // Replace various localhost patterns
+        let mut modified_content = content
+            .replace("localhost", public_ip)
+            .replace("127.0.0.1", public_ip)
+            .replace("0.0.0.0", public_ip); // Be careful with this one
+        
+        // For Flask specifically, ensure app.run() uses the public IP
+        if file_path.extension().map_or(false, |ext| ext == "py") {
+            // Replace app.run() calls to bind to 0.0.0.0 instead of localhost
+            modified_content = modified_content
+                .replace("app.run()", "app.run(host='0.0.0.0', port=5000)")
+                .replace("app.run(host='localhost'", "app.run(host='0.0.0.0'")
+                .replace("app.run(host=\"localhost\"", "app.run(host=\"0.0.0.0\"");
+        }
+        
+        // Only write if content changed
+        if modified_content != original_content {
+            fs::write(file_path, modified_content)?;
+            info!("✅ Updated localhost references in: {}", file_path.display());
+        }
+    }
+    
+    Ok(())
 }

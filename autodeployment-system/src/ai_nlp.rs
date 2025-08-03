@@ -305,7 +305,7 @@ Example for Flask on GCP:
             {{}}
           ]
         }},
-        "metadata_startup_script": "sudo apt update -y && sudo apt install -y python3 python3-pip && pip3 install Flask && echo 'from flask import Flask\\napp = Flask(__name__)\\n@app.route(\"/\")\\ndef hello():\\n    return \"<h1>Hello from Flask on GCP!</h1>\"\\nif __name__ == \"__main__\":\\n    app.run(host=\"0.0.0.0\", port=5000)' > /home/app.py && nohup python3 /home/app.py > /var/log/flask.log 2>&1 &",
+        "metadata_startup_script": "sudo apt update -y && sudo apt install -y python3 python3-pip git && pip3 install Flask && git clone {REPO_URL} /home/app && cd /home/app && python3 -c \\\"import os; [open(f, 'w').write(open(f).read().replace('localhost', '0.0.0.0').replace('127.0.0.1', '0.0.0.0')) for f in os.listdir('.') if f.endswith('.py')]\\\" 2>/dev/null || true && nohup python3 *.py > /var/log/flask.log 2>&1 &",
         "tags": ["flask-app", "http-server"]
       }}
     }},
