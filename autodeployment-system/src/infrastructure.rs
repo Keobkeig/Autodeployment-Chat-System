@@ -250,25 +250,6 @@ pub async fn provision_infrastructure(
     let mut cmd = Command::new("terraform");
     cmd.arg("plan").arg("-out=tfplan").current_dir(&terraform_dir);
     
-    // Add provider-specific Terraform variables
-    match cloud_provider {
-        CloudProvider::GCP => {
-            if let Some(gcp_creds) = &credentials.gcp {
-                cmd.arg("-var").arg(format!("project_id={}", gcp_creds.project_id));
-                let region = gcp_creds.region.as_deref().unwrap_or("us-central1");
-                cmd.arg("-var").arg(format!("region={}", region));
-                cmd.arg("-var").arg(format!("zone={}-a", region));
-            }
-        },
-        CloudProvider::AWS => {
-            if let Some(aws_creds) = &credentials.aws {
-                let region = aws_creds.region.as_deref().unwrap_or("us-east-1");
-                cmd.arg("-var").arg(format!("region={}", region));
-            }
-        },
-        _ => {}
-    }
-    
     // Add credentials as environment variables
     for (key, value) in &env_vars {
         cmd.env(key, value);
@@ -318,8 +299,7 @@ pub async fn provision_infrastructure(
     let url = if output.status.success() {
         if let Ok(outputs) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
             outputs
-                .get("instance_ip")
-                .or_else(|| outputs.get("public_ip"))
+                .get("public_ip")
                 .or_else(|| outputs.get("public_dns"))
                 .or_else(|| outputs.get("website_url"))
                 .and_then(|v| v.get("value"))
@@ -336,8 +316,7 @@ pub async fn provision_infrastructure(
     let public_ip = if output.status.success() {
         if let Ok(outputs) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
             outputs
-                .get("instance_ip")
-                .or_else(|| outputs.get("public_ip"))
+                .get("public_ip")
                 .and_then(|v| v.get("value"))
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string())
@@ -348,17 +327,10 @@ pub async fn provision_infrastructure(
         None
     };
 
-    // Format the URL with appropriate port for the application type
-    let formatted_url = if url != "unknown" {
-        format!("http://{}:5000", url)
-    } else {
-        format!("http://{}", url)
-    };
-    
-    logs.push(format!("🌐 Deployment URL: {}", formatted_url));
+    logs.push(format!("🌐 Deployment URL: http://{}", url));
 
     Ok(DeploymentResult {
-        url: formatted_url,
+        url: format!("http://{}", url),
         infrastructure_type: format!("{:?}", decision.deployment_type),
         public_ip,
         logs,
@@ -388,7 +360,7 @@ fn generate_terraform_files(
             main_tf.push_str("  region = var.region\n");
             main_tf.push_str("}\n\n");
         }
-        "gcp" | "google" => {
+        "gcp" => {
             main_tf.push_str("terraform {\n");
             main_tf.push_str("  required_providers {\n");
             main_tf.push_str("    google = {\n");
@@ -398,7 +370,7 @@ fn generate_terraform_files(
             main_tf.push_str("  }\n");
             main_tf.push_str("}\n\n");
             main_tf.push_str("provider \"google\" {\n");
-            main_tf.push_str("  project = var.project_id\n");
+            main_tf.push_str("  project = var.project\n");
             main_tf.push_str("  region  = var.region\n");
             main_tf.push_str("}\n\n");
         }
@@ -412,7 +384,7 @@ fn generate_terraform_files(
             resource.resource_type, resource.name
         ));
         for (key, value) in &resource.config {
-            main_tf.push_str(&format!("  {}\n", json_to_hcl(key, value, 1)));
+            main_tf.push_str(&format!("  {} = {}\n", key, value));
         }
         main_tf.push_str("}\n\n");
     }
@@ -486,74 +458,6 @@ fn generate_terraform_files(
     Ok(())
 }
 
-fn escape_hcl_string(s: &str) -> String {
-    s.replace('\\', "\\\\")
-     .replace('"', "\\\"")
-     .replace('\n', "\\n")
-     .replace('\r', "\\r")
-     .replace('\t', "\\t")
-}
-
-fn json_to_hcl(key: &str, value: &serde_json::Value, indent_level: usize) -> String {
-    let indent = "  ".repeat(indent_level);
-    
-    match value {
-        serde_json::Value::String(s) => {
-            // Don't quote if it's a Terraform variable reference
-            if s.starts_with("var.") || s.starts_with("${") {
-                format!("{} = {}", key, s)
-            } else {
-                // Properly escape the string for HCL
-                let escaped = escape_hcl_string(s);
-                format!("{} = \"{}\"", key, escaped)
-            }
-        }
-        serde_json::Value::Number(n) => {
-            format!("{} = {}", key, n)
-        }
-        serde_json::Value::Bool(b) => {
-            format!("{} = {}", key, b)
-        }
-        serde_json::Value::Array(arr) => {
-            if arr.is_empty() {
-                format!("{} = []", key)
-            } else if arr.iter().all(|v| v.is_string()) {
-                // Simple string array
-                let items: Vec<String> = arr.iter()
-                    .filter_map(|v| v.as_str())
-                    .map(|s| format!("\"{}\"", escape_hcl_string(s)))
-                    .collect();
-                format!("{} = [{}]", key, items.join(", "))
-            } else {
-                // Complex array - format as multiple blocks
-                let mut result = String::new();
-                for item in arr {
-                    if let serde_json::Value::Object(obj) = item {
-                        result.push_str(&format!("{} {{\n", key));
-                        for (subkey, subvalue) in obj {
-                            result.push_str(&format!("{}  {}\n", indent, json_to_hcl(subkey, subvalue, indent_level + 1)));
-                        }
-                        result.push_str(&format!("{}}}\n", indent));
-                    }
-                }
-                result.trim_end().to_string()
-            }
-        }
-        serde_json::Value::Object(obj) => {
-            // Handle as a block
-            let mut result = format!("{} {{\n", key);
-            for (subkey, subvalue) in obj {
-                result.push_str(&format!("{}  {}\n", indent, json_to_hcl(subkey, subvalue, indent_level + 1)));
-            }
-            result.push_str(&format!("{}}}", indent));
-            result
-        }
-        serde_json::Value::Null => {
-            format!("{} = null", key)
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -561,7 +465,7 @@ mod tests {
         ApplicationType, CloudProvider, DatabaseType, DeploymentRequirements, ScalingRequirements,
     };
     use crate::repository::{PackageManager, RepositoryAnalysis};
-    use tempfile::TempDir;
+    
 
     fn create_test_requirements() -> DeploymentRequirements {
         DeploymentRequirements {
@@ -592,12 +496,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_decide_infrastructure_single_vm() {
+    #[tokio::test]
+    async fn test_decide_infrastructure_single_vm() {
         let requirements = create_test_requirements();
         let analysis = create_test_analysis();
 
-        let decision = decide_infrastructure(&requirements, &analysis).unwrap();
+        let decision = decide_infrastructure(&requirements, &analysis, "").await.unwrap();
 
         assert!(matches!(decision.deployment_type, DeploymentType::SingleVM));
         assert_eq!(decision.instance_type, "t3.micro");
@@ -605,13 +509,13 @@ mod tests {
         assert!(decision.justification.contains("Flask"));
     }
 
-    #[test]
-    fn test_decide_infrastructure_serverless() {
+    #[tokio::test]
+    async fn test_decide_infrastructure_serverless() {
         let mut requirements = create_test_requirements();
         requirements.scaling_requirements = ScalingRequirements::Serverless;
         let analysis = create_test_analysis();
 
-        let decision = decide_infrastructure(&requirements, &analysis).unwrap();
+        let decision = decide_infrastructure(&requirements, &analysis, "").await.unwrap();
 
         assert!(matches!(
             decision.deployment_type,
@@ -620,14 +524,14 @@ mod tests {
         assert_eq!(decision.instance_type, "lambda");
     }
 
-    #[test]
-    fn test_decide_infrastructure_static_site() {
+    #[tokio::test]
+    async fn test_decide_infrastructure_static_site() {
         let requirements = create_test_requirements();
         let mut analysis = create_test_analysis();
         analysis.app_type = ApplicationType::React;
         analysis.requires_build_step = false;
 
-        let decision = decide_infrastructure(&requirements, &analysis).unwrap();
+        let decision = decide_infrastructure(&requirements, &analysis, "").await.unwrap();
 
         assert!(matches!(
             decision.deployment_type,
@@ -636,12 +540,12 @@ mod tests {
         assert_eq!(decision.instance_type, "static-hosting");
     }
 
-    #[test]
-    fn test_generate_terraform_vm_config() {
+    #[tokio::test]
+    async fn test_generate_terraform_vm_config() {
         let requirements = create_test_requirements();
         let analysis = create_test_analysis();
 
-        let decision = decide_infrastructure(&requirements, &analysis).unwrap();
+        let decision = decide_infrastructure(&requirements, &analysis, "").await.unwrap();
 
         // Check that Terraform config is generated
         assert_eq!(decision.terraform_config.provider, "aws");
@@ -658,15 +562,15 @@ mod tests {
         assert!(resource_types.contains(&"aws_instance"));
     }
 
-    #[test]
-    fn test_generate_terraform_files() {
+    #[tokio::test]
+    async fn test_generate_terraform_files() {
         let temp_dir = tempfile::tempdir().unwrap();
         let terraform_dir = temp_dir.path().join("terraform");
         fs::create_dir_all(&terraform_dir).unwrap();
 
         let requirements = create_test_requirements();
         let analysis = create_test_analysis();
-        let decision = decide_infrastructure(&requirements, &analysis).unwrap();
+        let decision = decide_infrastructure(&requirements, &analysis, "").await.unwrap();
 
         let result = generate_terraform_files(
             &decision.terraform_config,
@@ -688,19 +592,21 @@ mod tests {
         assert!(main_tf_content.contains("aws_instance"));
     }
 
-    #[test]
-    fn test_provision_infrastructure_dry_run() {
+    #[tokio::test]
+    async fn test_provision_infrastructure_dry_run() {
         let temp_dir = tempfile::tempdir().unwrap();
         let requirements = create_test_requirements();
         let analysis = create_test_analysis();
-        let decision = decide_infrastructure(&requirements, &analysis).unwrap();
+        let decision = decide_infrastructure(&requirements, &analysis, "").await.unwrap();
 
         let rt = tokio::runtime::Runtime::new().unwrap();
+
         let result = rt.block_on(provision_infrastructure(
             &decision,
             "https://github.com/test/repo",
             temp_dir.path(),
             true, // dry_run
+            &requirements.cloud_provider, // Add the missing fifth argument
         ));
 
         assert!(result.is_ok());
@@ -712,19 +618,20 @@ mod tests {
             .any(|log| log.contains("Dry run")));
     }
 
-    #[test]
-    fn test_provision_infrastructure_no_terraform() {
+    #[tokio::test]
+    async fn test_provision_infrastructure_no_terraform() {
         let temp_dir = tempfile::tempdir().unwrap();
         let requirements = create_test_requirements();
         let analysis = create_test_analysis();
-        let decision = decide_infrastructure(&requirements, &analysis).unwrap();
+        let decision = decide_infrastructure(&requirements, &analysis, "").await.unwrap();
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(provision_infrastructure(
             &decision,
             "https://github.com/test/repo",
             temp_dir.path(),
-            false, // not dry_run
+            false,
+            &requirements.cloud_provider // not dry_run
         ));
 
         // Should fail because Terraform is not installed
