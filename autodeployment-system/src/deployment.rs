@@ -11,7 +11,7 @@ use crate::credentials::CloudCredentials;
 pub async fn deploy_application(
     description: &str,
     repository: &str,
-    cloud_provider: &str,
+    cloud_provider: Option<&str>,
     dry_run: bool,
     force_deploy: bool,
 ) -> Result<DeploymentResult> {
@@ -20,28 +20,40 @@ pub async fn deploy_application(
     // Parse natural language requirements using AI
     info!("📝 Parsing deployment requirements from description using AI...");
     let mut requirements = ai_nlp::parse_deployment_requirements(description).await?;
-    requirements.cloud_provider = match cloud_provider.to_lowercase().as_str() {
-        "aws" => crate::nlp::CloudProvider::AWS,
-        "gcp" | "google" => crate::nlp::CloudProvider::GCP,
-        "azure" => crate::nlp::CloudProvider::Azure,
-        "digitalocean" => crate::nlp::CloudProvider::DigitalOcean,
-        _ => {
-            warn!("Unknown cloud provider '{}', defaulting to AWS", cloud_provider);
-            crate::nlp::CloudProvider::AWS
-        }
-    };
+    
+    // Use CLI cloud provider if provided, otherwise use LLM-parsed provider
+    if let Some(provider) = cloud_provider {
+        requirements.cloud_provider = match provider.to_lowercase().as_str() {
+            "aws" => crate::nlp::CloudProvider::AWS,
+            "gcp" | "google" => crate::nlp::CloudProvider::GCP,
+            "azure" => crate::nlp::CloudProvider::Azure,
+            "digitalocean" => crate::nlp::CloudProvider::DigitalOcean,
+            _ => {
+                warn!("Unknown cloud provider '{}', defaulting to AWS", provider);
+                crate::nlp::CloudProvider::AWS
+            }
+        };
+    }
+    // If no CLI provider specified, use what the LLM parsed from description
 
     // Check credentials for non-dry-run deployments
     if !dry_run || force_deploy {
-        info!("🔐 Checking credentials for {cloud_provider}...");
+        info!("🔐 Checking credentials for {:?}...", requirements.cloud_provider);
         let credentials = CloudCredentials::load_from_file()
             .unwrap_or_else(|_| CloudCredentials::new());
         
         if !credentials.has_credentials_for(&requirements.cloud_provider) {
+            let provider_str = match requirements.cloud_provider {
+                crate::nlp::CloudProvider::AWS => "aws",
+                crate::nlp::CloudProvider::GCP => "gcp",
+                crate::nlp::CloudProvider::Azure => "azure",
+                crate::nlp::CloudProvider::DigitalOcean => "digitalocean",
+                crate::nlp::CloudProvider::Unknown => "aws", // fallback
+            };
             return Err(anyhow!(
                 "❌ No credentials found for {:?}.\n💡 Set up credentials with: cargo run -- credentials setup {}",
                 requirements.cloud_provider,
-                cloud_provider
+                provider_str
             ));
         }
         
@@ -265,9 +277,7 @@ async fn deploy_with_chat(
     
     println!("☁️ Provisioning infrastructure...");
     let work_dir = tempfile::tempdir()?;
-    // Need to determine cloud provider from decision or requirements
-    let cloud_provider = crate::nlp::CloudProvider::AWS; // Default for now
-    let result = provision_infrastructure(&decision, repo_url, work_dir.path(), false, &cloud_provider).await?;
+    let result = provision_infrastructure(&decision, repo_url, work_dir.path(), false, &requirements.cloud_provider).await?;
     
     Ok(result)
 }

@@ -26,8 +26,8 @@ enum Commands {
         #[clap(short, long)]
         repository: String,
         
-        #[clap(short, long, default_value = "aws")]
-        cloud_provider: String,
+        #[clap(short, long)]
+        cloud_provider: Option<String>,
         
         #[clap(long)]
         dry_run: bool,
@@ -72,12 +72,12 @@ async fn main() -> Result<()> {
             info!("Starting deployment process...");
             info!("Description: {}", description);
             info!("Repository: {}", repository);
-            info!("Cloud Provider: {}", cloud_provider);
+            info!("Cloud Provider: {:?}", cloud_provider);
             
             let deployment_result = deployment::deploy_application(
                 &description,
                 &repository,
-                &cloud_provider,
+                cloud_provider.as_deref(),
                 dry_run,
                 force_deploy,
             ).await;

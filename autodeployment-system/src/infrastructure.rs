@@ -250,6 +250,25 @@ pub async fn provision_infrastructure(
     let mut cmd = Command::new("terraform");
     cmd.arg("plan").arg("-out=tfplan").current_dir(&terraform_dir);
     
+    // Add provider-specific Terraform variables
+    match cloud_provider {
+        CloudProvider::GCP => {
+            if let Some(gcp_creds) = &credentials.gcp {
+                cmd.arg("-var").arg(format!("project_id={}", gcp_creds.project_id));
+                let region = gcp_creds.region.as_deref().unwrap_or("us-central1");
+                cmd.arg("-var").arg(format!("region={}", region));
+                cmd.arg("-var").arg(format!("zone={}-a", region));
+            }
+        },
+        CloudProvider::AWS => {
+            if let Some(aws_creds) = &credentials.aws {
+                let region = aws_creds.region.as_deref().unwrap_or("us-east-1");
+                cmd.arg("-var").arg(format!("region={}", region));
+            }
+        },
+        _ => {}
+    }
+    
     // Add credentials as environment variables
     for (key, value) in &env_vars {
         cmd.env(key, value);
@@ -299,7 +318,8 @@ pub async fn provision_infrastructure(
     let url = if output.status.success() {
         if let Ok(outputs) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
             outputs
-                .get("public_ip")
+                .get("instance_ip")
+                .or_else(|| outputs.get("public_ip"))
                 .or_else(|| outputs.get("public_dns"))
                 .or_else(|| outputs.get("website_url"))
                 .and_then(|v| v.get("value"))
@@ -316,7 +336,8 @@ pub async fn provision_infrastructure(
     let public_ip = if output.status.success() {
         if let Ok(outputs) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
             outputs
-                .get("public_ip")
+                .get("instance_ip")
+                .or_else(|| outputs.get("public_ip"))
                 .and_then(|v| v.get("value"))
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string())
@@ -327,10 +348,17 @@ pub async fn provision_infrastructure(
         None
     };
 
-    logs.push(format!("🌐 Deployment URL: http://{}", url));
+    // Format the URL with appropriate port for the application type
+    let formatted_url = if url != "unknown" {
+        format!("http://{}:5000", url)
+    } else {
+        format!("http://{}", url)
+    };
+    
+    logs.push(format!("🌐 Deployment URL: {}", formatted_url));
 
     Ok(DeploymentResult {
-        url: format!("http://{}", url),
+        url: formatted_url,
         infrastructure_type: format!("{:?}", decision.deployment_type),
         public_ip,
         logs,
@@ -360,7 +388,7 @@ fn generate_terraform_files(
             main_tf.push_str("  region = var.region\n");
             main_tf.push_str("}\n\n");
         }
-        "gcp" => {
+        "gcp" | "google" => {
             main_tf.push_str("terraform {\n");
             main_tf.push_str("  required_providers {\n");
             main_tf.push_str("    google = {\n");
@@ -370,7 +398,7 @@ fn generate_terraform_files(
             main_tf.push_str("  }\n");
             main_tf.push_str("}\n\n");
             main_tf.push_str("provider \"google\" {\n");
-            main_tf.push_str("  project = var.project\n");
+            main_tf.push_str("  project = var.project_id\n");
             main_tf.push_str("  region  = var.region\n");
             main_tf.push_str("}\n\n");
         }
@@ -384,7 +412,7 @@ fn generate_terraform_files(
             resource.resource_type, resource.name
         ));
         for (key, value) in &resource.config {
-            main_tf.push_str(&format!("  {} = {}\n", key, value));
+            main_tf.push_str(&format!("  {}\n", json_to_hcl(key, value, 1)));
         }
         main_tf.push_str("}\n\n");
     }
@@ -456,6 +484,74 @@ fn generate_terraform_files(
     fs::write(terraform_dir.join("outputs.tf"), outputs_tf)?;
 
     Ok(())
+}
+
+fn escape_hcl_string(s: &str) -> String {
+    s.replace('\\', "\\\\")
+     .replace('"', "\\\"")
+     .replace('\n', "\\n")
+     .replace('\r', "\\r")
+     .replace('\t', "\\t")
+}
+
+fn json_to_hcl(key: &str, value: &serde_json::Value, indent_level: usize) -> String {
+    let indent = "  ".repeat(indent_level);
+    
+    match value {
+        serde_json::Value::String(s) => {
+            // Don't quote if it's a Terraform variable reference
+            if s.starts_with("var.") || s.starts_with("${") {
+                format!("{} = {}", key, s)
+            } else {
+                // Properly escape the string for HCL
+                let escaped = escape_hcl_string(s);
+                format!("{} = \"{}\"", key, escaped)
+            }
+        }
+        serde_json::Value::Number(n) => {
+            format!("{} = {}", key, n)
+        }
+        serde_json::Value::Bool(b) => {
+            format!("{} = {}", key, b)
+        }
+        serde_json::Value::Array(arr) => {
+            if arr.is_empty() {
+                format!("{} = []", key)
+            } else if arr.iter().all(|v| v.is_string()) {
+                // Simple string array
+                let items: Vec<String> = arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(|s| format!("\"{}\"", escape_hcl_string(s)))
+                    .collect();
+                format!("{} = [{}]", key, items.join(", "))
+            } else {
+                // Complex array - format as multiple blocks
+                let mut result = String::new();
+                for item in arr {
+                    if let serde_json::Value::Object(obj) = item {
+                        result.push_str(&format!("{} {{\n", key));
+                        for (subkey, subvalue) in obj {
+                            result.push_str(&format!("{}  {}\n", indent, json_to_hcl(subkey, subvalue, indent_level + 1)));
+                        }
+                        result.push_str(&format!("{}}}\n", indent));
+                    }
+                }
+                result.trim_end().to_string()
+            }
+        }
+        serde_json::Value::Object(obj) => {
+            // Handle as a block
+            let mut result = format!("{} {{\n", key);
+            for (subkey, subvalue) in obj {
+                result.push_str(&format!("{}  {}\n", indent, json_to_hcl(subkey, subvalue, indent_level + 1)));
+            }
+            result.push_str(&format!("{}}}", indent));
+            result
+        }
+        serde_json::Value::Null => {
+            format!("{} = null", key)
+        }
+    }
 }
 
 #[cfg(test)]

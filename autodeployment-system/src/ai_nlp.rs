@@ -1,15 +1,18 @@
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
+use log::info;
 use reqwest;
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::collections::HashMap;
-use log::info;
+use std::env;
 
-use crate::nlp::{DeploymentRequirements, ApplicationType, CloudProvider, ScalingRequirements, DatabaseType};
 use crate::infrastructure::TerraformConfig;
+use crate::nlp::{
+    ApplicationType, CloudProvider, DatabaseType, DeploymentRequirements, ScalingRequirements,
+};
 
-const GEMINI_API_KEY: &str = "AIzaSyAiA5zlxjAJiMkoDCSJFPnTklvLCE786pk";
-const GEMINI_API_URL: &str = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent";
+const GEMINI_API_URL: &str =
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
 
 #[derive(Serialize)]
 struct GeminiRequest {
@@ -46,6 +49,8 @@ struct GeminiResponse {
 #[derive(Deserialize)]
 struct GeminiCandidate {
     content: GeminiResponseContent,
+    #[serde(rename = "finishReason")]
+    finish_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -72,7 +77,7 @@ struct ParsedRequirements {
 
 pub async fn parse_deployment_requirements(description: &str) -> Result<DeploymentRequirements> {
     info!("🤖 Using Gemini 2.5 Flash to parse deployment requirements...");
-    
+
     let prompt = format!(
         r#"Analyze this deployment description and extract structured deployment requirements in JSON format:
 
@@ -105,13 +110,18 @@ Rules:
     );
 
     let response_text = call_gemini_api(&prompt).await?;
-    
+
     // Clean the response to extract JSON
     let json_text = extract_json_from_response(&response_text)?;
-    
+
     // Parse the JSON response
-    let parsed: ParsedRequirements = serde_json::from_str(&json_text)
-        .map_err(|e| anyhow!("Failed to parse Gemini response as JSON: {}. Response: {}", e, json_text))?;
+    let parsed: ParsedRequirements = serde_json::from_str(&json_text).map_err(|e| {
+        anyhow!(
+            "Failed to parse Gemini response as JSON: {}. Response: {}",
+            e,
+            json_text
+        )
+    })?;
 
     // Convert to our internal types
     let application_type = match parsed.application_type.as_str() {
@@ -144,7 +154,8 @@ Rules:
         _ => CloudProvider::AWS,
     };
 
-    let database_requirements = parsed.database_requirements
+    let database_requirements = parsed
+        .database_requirements
         .iter()
         .filter_map(|db| match db.as_str() {
             "PostgreSQL" => Some(DatabaseType::PostgreSQL),
@@ -179,7 +190,7 @@ pub async fn generate_terraform_with_ai(
     deployment_type: &str,
 ) -> Result<TerraformConfig> {
     info!("🤖 Using Gemini 2.5 Flash to generate Terraform configuration...");
-    
+
     let prompt = format!(
         r#"Generate a Terraform configuration for this deployment:
 
@@ -247,7 +258,7 @@ Generate Terraform configuration as JSON with this exact structure:
       "description": "Instance public IP"
     }},
     "public_dns": {{
-      "value": "aws_instance.app_instance.public_dns", 
+      "value": "aws_instance.app_instance.public_dns",
       "description": "Instance public DNS"
     }}
   }}
@@ -255,7 +266,7 @@ Generate Terraform configuration as JSON with this exact structure:
 
 Requirements:
 - For AWS: Use EC2 instances, security groups, proper AMIs
-- For GCP: Use compute instances, firewall rules, proper images  
+- For GCP: Use compute instances, firewall rules, proper images
 - For Azure: Use virtual machines, network security groups, proper images
 - Include proper networking, security, and application setup
 - Use appropriate instance types for the workload
@@ -263,21 +274,97 @@ Requirements:
 - Avoid complex multi-line scripts or embedded quotes
 - Set up proper ports based on application type
 
-IMPORTANT: 
+IMPORTANT:
 - Keep strings simple, avoid nested quotes, use minimal user_data scripts
 - Use modern Terraform syntax: "aws_instance.app_instance.public_ip" not "${{aws_instance.app_instance.public_ip}}"
 - Output values should be unquoted resource references
 - Variable references should be simple: "var.region" not "${{var.region}}"
+- Always include "name" field for all resources
+- Use "allow" blocks for firewall rules, not "allows"
+
+Example for Flask on GCP:
+{{
+  "provider": "google",
+  "resources": [
+    {{
+      "resource_type": "google_compute_instance",
+      "name": "flask_app_instance",
+      "config": {{
+        "name": "flask-app-instance",
+        "project": "var.project_id",
+        "zone": "var.zone",
+        "machine_type": "e2-medium",
+        "boot_disk": {{
+          "initialize_params": {{
+            "image": "debian-cloud/debian-11"
+          }}
+        }},
+        "network_interface": {{
+          "network": "default",
+          "access_config": [
+            {{}}
+          ]
+        }},
+        "metadata_startup_script": "sudo apt update -y && sudo apt install -y python3 python3-pip && pip3 install Flask && echo 'from flask import Flask\\napp = Flask(__name__)\\n@app.route(\"/\")\\ndef hello():\\n    return \"<h1>Hello from Flask on GCP!</h1>\"\\nif __name__ == \"__main__\":\\n    app.run(host=\"0.0.0.0\", port=5000)' > /home/app.py && nohup python3 /home/app.py > /var/log/flask.log 2>&1 &",
+        "tags": ["flask-app", "http-server"]
+      }}
+    }},
+    {{
+      "resource_type": "google_compute_firewall", 
+      "name": "flask_app_firewall",
+      "config": {{
+        "name": "flask-app-firewall",
+        "project": "var.project_id",
+        "network": "default",
+        "allow": [
+          {{
+            "protocol": "tcp",
+            "ports": ["22", "5000"]
+          }}
+        ],
+        "source_ranges": ["0.0.0.0/0"],
+        "target_tags": ["flask-app"]
+      }}
+    }}
+  ],
+  "variables": {{
+    "project_id": "GCP project ID",
+    "region": "GCP region", 
+    "zone": "GCP zone"
+  }},
+  "outputs": {{
+    "instance_ip": {{
+      "value": "google_compute_instance.flask_app_instance.network_interface[0].access_config[0].nat_ip",
+      "description": "Public IP address of the Flask application instance"
+    }}
+  }}
+}}
 
 Respond with ONLY the JSON object, no markdown or explanation."#,
         description, cloud_provider, deployment_type
     );
 
     let response_text = call_gemini_api(&prompt).await?;
+    
+    // Log the raw response for debugging
+    info!("🔍 Raw Gemini response: {}", response_text);
+    
     let json_text = extract_json_from_response(&response_text)?;
     
-    let config: TerraformConfig = serde_json::from_str(&json_text)
-        .map_err(|e| anyhow!("Failed to parse AI-generated Terraform config: {}. Response: {}", e, json_text))?;
+    // Log the extracted JSON for debugging
+    info!("🔍 Extracted JSON: {}", json_text);
+    
+    if json_text.is_empty() {
+        return Err(anyhow!("Empty response from Gemini API. Raw response: {}", response_text));
+    }
+
+    let config: TerraformConfig = serde_json::from_str(&json_text).map_err(|e| {
+        anyhow!(
+            "Failed to parse AI-generated Terraform config: {}. Response: {}",
+            e,
+            json_text
+        )
+    })?;
 
     info!("✅ Successfully generated Terraform config using AI");
     info!("   Provider: {}", config.provider);
@@ -288,7 +375,10 @@ Respond with ONLY the JSON object, no markdown or explanation."#,
 
 async fn call_gemini_api(prompt: &str) -> Result<String> {
     let client = reqwest::Client::new();
-    
+
+    let api_key = env::var("GEMINI_API_KEY")
+        .map_err(|_| anyhow!("GEMINI_API_KEY environment variable not set"))?;
+
     let request = GeminiRequest {
         contents: vec![GeminiContent {
             parts: vec![GeminiPart {
@@ -299,12 +389,15 @@ async fn call_gemini_api(prompt: &str) -> Result<String> {
             temperature: 0.1,
             top_k: 32,
             top_p: 1.0,
-            max_output_tokens: 2048,
+            max_output_tokens: 100000,
         },
     };
 
-    let url = format!("{}?key={}", GEMINI_API_URL, GEMINI_API_KEY);
+    let url = format!("{}?key={}", GEMINI_API_URL, api_key);
     
+    info!("🔍 Making API call to: {}", GEMINI_API_URL);
+    info!("🔍 Request payload size: {} bytes", serde_json::to_string(&request)?.len());
+
     let response = client
         .post(&url)
         .header("Content-Type", "application/json")
@@ -313,33 +406,51 @@ async fn call_gemini_api(prompt: &str) -> Result<String> {
         .await
         .map_err(|e| anyhow!("Failed to call Gemini API: {}", e))?;
 
-    if !response.status().is_success() {
-        let status = response.status();
-        let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+    let status = response.status();
+    info!("🔍 Response status: {}", status);
+
+    if !status.is_success() {
+        let error_text = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "Unknown error".to_string());
         return Err(anyhow!("Gemini API error {}: {}", status, error_text));
     }
 
-    let gemini_response: GeminiResponse = response
-        .json()
+    let response_text = response
+        .text()
         .await
-        .map_err(|e| anyhow!("Failed to parse Gemini response: {}", e))?;
+        .map_err(|e| anyhow!("Failed to read response text: {}", e))?;
+    
+    info!("🔍 Raw response body: {}", response_text);
+
+    let gemini_response: GeminiResponse = serde_json::from_str(&response_text)
+        .map_err(|e| anyhow!("Failed to parse Gemini response as JSON: {}. Response: {}", e, response_text))?;
 
     if gemini_response.candidates.is_empty() {
-        return Err(anyhow!("No candidates in Gemini response"));
+        return Err(anyhow!("No candidates in Gemini response. Full response: {}", response_text));
     }
 
     if gemini_response.candidates[0].content.parts.is_empty() {
-        return Err(anyhow!("No parts in Gemini response"));
+        return Err(anyhow!("No parts in Gemini response. Full response: {}", response_text));
     }
 
     Ok(gemini_response.candidates[0].content.parts[0].text.clone())
 }
 
 fn extract_json_from_response(response: &str) -> Result<String> {
+    let response = response.trim();
+    
+    // Check if response is empty
+    if response.is_empty() {
+        return Err(anyhow!("Empty response from API"));
+    }
+    
     // Remove markdown code blocks if present
     let cleaned = response
-        .trim()
         .strip_prefix("```json")
+        .unwrap_or(response)
+        .strip_prefix("```")
         .unwrap_or(response)
         .strip_suffix("```")
         .unwrap_or(response)
@@ -349,13 +460,17 @@ fn extract_json_from_response(response: &str) -> Result<String> {
     if let Some(start) = cleaned.find('{') {
         if let Some(end) = cleaned.rfind('}') {
             if end > start {
-                return Ok(cleaned[start..=end].to_string());
+                let json_str = cleaned[start..=end].to_string();
+                // Validate that it's not just empty braces
+                if json_str.len() > 2 {
+                    return Ok(json_str);
+                }
             }
         }
     }
 
-    // If no clear JSON boundaries, return the cleaned response
-    Ok(cleaned.to_string())
+    // If no clear JSON boundaries found, return error with details
+    Err(anyhow!("No valid JSON object found in response: '{}'", cleaned))
 }
 
 #[cfg(test)]
