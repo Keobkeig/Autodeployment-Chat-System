@@ -1,0 +1,30 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# Environment variables (contains sensitive data)
+.env
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Terraform files
+terraform-output/
+*.tfplan
+*.tfstate
+*.tfstate.backup
+.terraform/
+
+# Log files
+*.log
+
+# Credential files
+~/.autodeployment/
