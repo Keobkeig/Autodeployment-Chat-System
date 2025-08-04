@@ -2,7 +2,7 @@
 
 A Rust-based command-line tool that automates application deployment based on natural language input and repository analysis. The system intelligently analyzes code repositories, determines optimal infrastructure configurations, and generates Terraform configurations for deployment with secure credential management.
 
-## 🚀 Features
+## Features
 
 - **Natural Language Processing**: Parse deployment requirements from human-readable descriptions using Google Gemini AI
 - **Intelligent Repository Analysis**: Automatically detect application types, dependencies, and configurations
@@ -12,14 +12,6 @@ A Rust-based command-line tool that automates application deployment based on na
 - **Interactive Chat Mode**: Conversational interface for deployment planning
 - **Cost Estimation**: Provide cost estimates for different deployment options
 - **Secure Credential Management**: Store and manage cloud platform credentials securely
-
-## 📋 Supported Application Types
-
-- **Python**: Flask, Django, FastAPI
-- **Node.js**: Express, React, Next.js
-- **Ruby**: Rails
-- **Java**: Spring Boot
-- **Static Sites**: React builds, static HTML/CSS/JS
 
 ## 🛠️ Installation
 
@@ -42,12 +34,7 @@ cargo build --release
 
 1. **Set up environment variables**:
    ```bash
-   # Copy the example environment file
-   cp .env.example .env
-   
    # Edit .env and add your Google Gemini API key
-   # Get your API key from: https://makersuite.google.com/app/apikey
-   nano .env
    ```
 
 2. **Configure cloud platform credentials** (choose your cloud provider):
@@ -76,26 +63,14 @@ Deploy an application with a single command:
 ```bash
 # Deploy with natural language description
 cargo run -- deploy \
-  --description "Deploy this Flask application on AWS" \
+  --description "Deploy this Flask application on GCP" \
   --repository "https://github.com/Arvo-AI/hello_world"
 
-# Dry run to see what would be deployed
+# Can also specify cloud provider
 cargo run -- deploy \
-  --description "Deploy with auto-scaling on GCP" \
-  --repository "https://github.com/user/repo" \
-  --dry-run
-
-# Specify cloud provider
-cargo run -- deploy \
-  --description "Deploy this Node.js app" \
-  --repository "https://github.com/user/repo" \
-  --cloud-provider "azure"
-
-# Force deployment (bypasses dry-run for credential testing)
-cargo run -- deploy \
-  --description "Deploy this Flask app" \
-  --repository "https://github.com/user/repo" \
-  --force-deploy
+  --description "Deploy this Flask application on GCP" \
+  --repository "https://github.com/Arvo-AI/hello_world" \
+  --cloud-provider "gcp"
 ```
 
 ### Credential Management
@@ -135,7 +110,7 @@ Chat commands:
 - `help` - Show available commands
 - `quit` - Exit the chat
 
-## 🏗️ Architecture
+## Architecture
 
 The system consists of five main modules:
 
@@ -169,36 +144,7 @@ The system consists of five main modules:
 - Handles error scenarios and logging
 - Integrates credential validation with deployment flow
 
-## 🌐 Example Deployments
-
-### Flask Application
-```bash
-cargo run -- deploy \
-  --description "Deploy this Flask app on AWS with PostgreSQL" \
-  --repository "https://github.com/user/flask-app"
-```
-
-**Result**: Single VM deployment with PostgreSQL RDS instance
-
-### React Application
-```bash
-cargo run -- deploy \
-  --description "Deploy this React app with CDN" \
-  --repository "https://github.com/user/react-app"
-```
-
-**Result**: S3 static hosting with CloudFront distribution
-
-### Node.js with Auto-scaling
-```bash
-cargo run -- deploy \
-  --description "Deploy Node.js app with auto-scaling on GCP" \
-  --repository "https://github.com/user/node-app"
-```
-
-**Result**: Google Cloud Run with automatic scaling
-
-## 🎯 Natural Language Examples
+## Natural Language Examples
 
 The system understands various deployment requirements:
 
@@ -208,7 +154,7 @@ The system understands various deployment requirements:
 - **"Deploy with PostgreSQL database"** → VM + RDS/Cloud SQL
 - **"Deploy static site with CDN"** → S3/Cloud Storage + CDN
 
-## 💰 Cost Estimation
+## Cost Estimation
 
 The system provides cost estimates for different deployment options:
 
@@ -263,22 +209,7 @@ Generated Terraform files are saved to:
 - `./terraform-output/deployment_YYYYMMDD_HHMMSS/`
 - Contains: `main.tf`, `variables.tf`, `outputs.tf`
 
-## 🧪 Testing
-
-Run the test suite:
-```bash
-cargo test
-```
-
-Test with the hello_world example:
-```bash
-cargo run -- deploy \
-  --description "Deploy this Flask application on AWS" \
-  --repository "https://github.com/Arvo-AI/hello_world" \
-  --dry-run
-```
-
-## 🔒 Security Considerations
+## Security Considerations
 
 - Repository cloning uses temporary directories
 - **Environment variables**: API keys stored in `.env` file (excluded from version control)
@@ -289,23 +220,7 @@ cargo run -- deploy \
 - Terraform state should be managed securely in production
 - Generated configurations follow security best practices
 
-## 🚧 Limitations
-
-- **Git Dependency**: Requires `git` command for repository cloning
-- **Terraform Required**: Actual deployments require Terraform installation
-- **Google Gemini API**: Requires internet connection and valid API key for AI features
-- **Cloud Credentials**: Users must provide valid cloud platform credentials for deployments
-
-## 🔮 Future Enhancements
-
-- **Database Integration**: Automatic database provisioning
-- **SSL/TLS**: Automatic certificate management
-- **Monitoring**: Built-in monitoring and alerting setup
-- **CI/CD**: Integration with GitHub Actions/GitLab CI
-- **Multi-region**: Deployment across multiple regions
-- **Cost Optimization**: Automatic cost optimization suggestions
-
-## 📚 Dependencies and Sources
+## Dependencies and Sources
 
 ### Rust Crates Used
 - **clap**: Command-line argument parsing
@@ -324,6 +239,7 @@ cargo run -- deploy \
 ### External Tools
 - **Git**: Repository cloning
 - **Terraform**: Infrastructure provisioning
+- **Claude Code**: Terraform and gcloud debugging, README.md gen
 
 ### References
 - [Google Gemini API Documentation](https://ai.google.dev/docs)
@@ -333,14 +249,7 @@ cargo run -- deploy \
 - [AWS Pricing Calculator](https://calculator.aws/)
 - [Rust Documentation](https://doc.rust-lang.org/)
 
-## 📄 License
+## License
 
 This project is open-source and available under the MIT License.
-
-## 🤝 Contributing
-
-Contributions are welcome! Please feel free to submit issues and pull requests.
-
 ---
-
-**Generated with Claude Code** 🤖
