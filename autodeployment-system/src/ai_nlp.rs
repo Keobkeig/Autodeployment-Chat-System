@@ -49,8 +49,6 @@ struct GeminiResponse {
 #[derive(Deserialize)]
 struct GeminiCandidate {
     content: GeminiResponseContent,
-    #[serde(rename = "finishReason")]
-    finish_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -166,10 +164,8 @@ Rules:
         })
         .collect();
 
-    info!("✅ Successfully parsed requirements using AI");
     info!("   Application Type: {:?}", application_type);
     info!("   Scaling: {:?}", scaling_requirements);
-    info!("   Cloud Provider: {:?}", cloud_provider);
     info!("   Databases: {:?}", database_requirements);
 
     Ok(DeploymentRequirements {
@@ -188,6 +184,8 @@ pub async fn generate_terraform_with_ai(
     description: &str,
     cloud_provider: &CloudProvider,
     deployment_type: &str,
+    app_type: &crate::nlp::ApplicationType,
+    repository_url: &str,
 ) -> Result<TerraformConfig> {
     info!("🤖 Using Gemini 2.5 Flash to generate Terraform configuration...");
 
@@ -197,6 +195,8 @@ pub async fn generate_terraform_with_ai(
 Description: "{}"
 Cloud Provider: {:?}
 Deployment Type: {}
+Application Type: {:?}
+Repository URL: {}
 
 Generate Terraform configuration as JSON with this exact structure:
 
@@ -270,9 +270,10 @@ Requirements:
 - For Azure: Use virtual machines, network security groups, proper images
 - Include proper networking, security, and application setup
 - Use appropriate instance types for the workload
-- For user_data: use simple bootstrap commands like "apt update && apt install python3 -y"
-- Avoid complex multi-line scripts or embedded quotes
-- Set up proper ports based on application type
+- For user_data: use complete application deployment commands
+- For Flask apps: ALWAYS include git clone, dependency installation, and app startup
+- Set up proper ports based on application type (Flask = 5000, Node.js = 3000, etc.)
+- ALWAYS include application ports in firewall rules
 
 IMPORTANT:
 - Keep strings simple, avoid nested quotes, use minimal user_data scripts
@@ -305,7 +306,7 @@ Example for Flask on GCP:
             {{}}
           ]
         }},
-        "metadata_startup_script": "sudo apt update -y && sudo apt install -y python3 python3-pip git && pip3 install Flask && git clone {REPO_URL} /home/app && cd /home/app && python3 -c \\\"import os; [open(f, 'w').write(open(f).read().replace('localhost', '0.0.0.0').replace('127.0.0.1', '0.0.0.0')) for f in os.listdir('.') if f.endswith('.py')]\\\" 2>/dev/null || true && nohup python3 *.py > /var/log/flask.log 2>&1 &",
+        "metadata_startup_script": "sudo apt update -y && sudo apt install -y python3 python3-pip git && cd /tmp && git clone https://github.com/Arvo-AI/hello_world.git && cd hello_world/app && sudo pip3 install -r requirements.txt && nohup python3 app.py > /var/log/flask.log 2>&1 &",
         "tags": ["flask-app", "http-server"]
       }}
     }},
@@ -334,14 +335,21 @@ Example for Flask on GCP:
   }},
   "outputs": {{
     "instance_ip": {{
-      "value": "google_compute_instance.flask_app_instance.network_interface[0].access_config[0].nat_ip",
+      value = join("",["http://",google_compute_instance.default.network_interface.0.access_config.0.nat_ip,":5000"])
       "description": "Public IP address of the Flask application instance"
     }}
   }}
 }}
 
+FOR FLASK APPLICATIONS: ALWAYS include complete deployment script:
+- git clone {repository_url} 
+- cd to app directory
+- install dependencies 
+- start Flask app with nohup python3 app.py &
+- Include port 5000 in firewall rules
+
 Respond with ONLY the JSON object, no markdown or explanation."#,
-        description, cloud_provider, deployment_type
+        description, cloud_provider, deployment_type, app_type, repository_url
     );
 
     let response_text = call_gemini_api(&prompt).await?;
@@ -396,7 +404,6 @@ async fn call_gemini_api(prompt: &str) -> Result<String> {
     let url = format!("{}?key={}", GEMINI_API_URL, api_key);
     
     info!("🔍 Making API call to: {}", GEMINI_API_URL);
-    info!("🔍 Request payload size: {} bytes", serde_json::to_string(&request)?.len());
 
     let response = client
         .post(&url)

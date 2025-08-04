@@ -58,6 +58,7 @@ pub async fn decide_infrastructure(
     requirements: &DeploymentRequirements,
     analysis: &RepositoryAnalysis,
     description: &str,
+    repository_url: &str,
 ) -> Result<InfrastructureDecision> {
     let deployment_type = determine_deployment_type(requirements, analysis);
     let instance_type = determine_instance_type(&deployment_type, &requirements.cloud_provider);
@@ -65,6 +66,8 @@ pub async fn decide_infrastructure(
         description,
         &requirements.cloud_provider,
         &format!("{:?}", deployment_type),
+        &analysis.app_type,
+        repository_url,
     ).await?;
     let estimated_cost = estimate_cost(&deployment_type, &requirements.cloud_provider);
     let justification = generate_justification(&deployment_type, requirements, analysis);
@@ -250,6 +253,24 @@ pub async fn provision_infrastructure(
     let mut cmd = Command::new("terraform");
     cmd.arg("plan").arg("-out=tfplan").current_dir(&terraform_dir);
     
+    match cloud_provider {
+        CloudProvider::GCP => {
+            if let Some(gcp_creds) = &credentials.gcp {
+                cmd.arg("-var").arg(format!("project_id={}", gcp_creds.project_id));
+                let region = gcp_creds.region.as_deref().unwrap_or("us-central1");
+                cmd.arg("-var").arg(format!("region={}", region));
+                cmd.arg("-var").arg(format!("zone={}-a", region));
+            }
+        },
+        CloudProvider::AWS => {
+            if let Some(aws_creds) = &credentials.aws {
+                let region = aws_creds.region.as_deref().unwrap_or("us-east-1");
+                cmd.arg("-var").arg(format!("region={}", region));
+            }
+        },
+        _ => {}
+    }
+    
     // Add credentials as environment variables
     for (key, value) in &env_vars {
         cmd.env(key, value);
@@ -329,7 +350,7 @@ pub async fn provision_infrastructure(
         None
     };
 
-    logs.push(format!("🌐 Deployment URL: http://{}", url));
+    logs.push(format!("🌐 Deployment URL: {}", url));
 
     Ok(DeploymentResult {
         url: format!("http://{}", url),
@@ -344,6 +365,7 @@ fn generate_terraform_files(
     terraform_dir: &Path,
     repo_url: &str,
 ) -> Result<()> {
+    let timestamp = Utc::now().format("%Y%m%d-%H%M%S").to_string();
     // Generate main.tf
     let mut main_tf = String::new();
 
@@ -386,7 +408,22 @@ fn generate_terraform_files(
             resource.resource_type, resource.name
         ));
         for (key, value) in &resource.config {
-            main_tf.push_str(&format!("  {} = {}\n", key, value));
+            // Add sed commands to startup scripts to replace localhost with 0.0.0.0
+            let processed_value = if key == "metadata_startup_script" || key == "user_data" {
+                replace_git_clone_with_download(value, repo_url)
+            } else {
+                value.clone()
+            };
+            
+            // Add timestamp to firewall rule names to avoid conflicts
+            if key == "name" && resource.resource_type.contains("firewall") {
+                if let serde_json::Value::String(name) = &processed_value {
+                    let unique_name = format!("{}-{}", name, timestamp);
+                    main_tf.push_str(&format!("  name = \"{}\"\n", unique_name));
+                    continue;
+                }
+            }
+            main_tf.push_str(&format!("  {}\n", json_to_hcl(key, &processed_value, 1)));
         }
         main_tf.push_str("}\n\n");
     }
@@ -503,7 +540,7 @@ mod tests {
         let requirements = create_test_requirements();
         let analysis = create_test_analysis();
 
-        let decision = decide_infrastructure(&requirements, &analysis, "").await.unwrap();
+        let decision = decide_infrastructure(&requirements, &analysis, "", "https://github.com/Arvo-AI/hello_world/tree/main").await.unwrap();
 
         assert!(matches!(decision.deployment_type, DeploymentType::SingleVM));
         assert_eq!(decision.instance_type, "t3.micro");
@@ -517,7 +554,7 @@ mod tests {
         requirements.scaling_requirements = ScalingRequirements::Serverless;
         let analysis = create_test_analysis();
 
-        let decision = decide_infrastructure(&requirements, &analysis, "").await.unwrap();
+        let decision = decide_infrastructure(&requirements, &analysis, "", "https://github.com/Arvo-AI/hello_world/tree/main").await.unwrap();
 
         assert!(matches!(
             decision.deployment_type,
@@ -533,7 +570,7 @@ mod tests {
         analysis.app_type = ApplicationType::React;
         analysis.requires_build_step = false;
 
-        let decision = decide_infrastructure(&requirements, &analysis, "").await.unwrap();
+        let decision = decide_infrastructure(&requirements, &analysis, "", "https://github.com/Arvo-AI/hello_world/tree/main").await.unwrap();
 
         assert!(matches!(
             decision.deployment_type,
@@ -547,7 +584,7 @@ mod tests {
         let requirements = create_test_requirements();
         let analysis = create_test_analysis();
 
-        let decision = decide_infrastructure(&requirements, &analysis, "").await.unwrap();
+        let decision = decide_infrastructure(&requirements, &analysis, "", "https://github.com/Arvo-AI/hello_world/tree/main").await.unwrap();
 
         // Check that Terraform config is generated
         assert_eq!(decision.terraform_config.provider, "aws");
@@ -572,7 +609,7 @@ mod tests {
 
         let requirements = create_test_requirements();
         let analysis = create_test_analysis();
-        let decision = decide_infrastructure(&requirements, &analysis, "").await.unwrap();
+        let decision = decide_infrastructure(&requirements, &analysis, "", "https://github.com/Arvo-AI/hello_world/tree/main").await.unwrap();
 
         let result = generate_terraform_files(
             &decision.terraform_config,
@@ -599,7 +636,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let requirements = create_test_requirements();
         let analysis = create_test_analysis();
-        let decision = decide_infrastructure(&requirements, &analysis, "").await.unwrap();
+        let decision = decide_infrastructure(&requirements, &analysis, "", "https://github.com/Arvo-AI/hello_world/tree/main").await.unwrap();
 
         let rt = tokio::runtime::Runtime::new().unwrap();
 
@@ -625,7 +662,7 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         let requirements = create_test_requirements();
         let analysis = create_test_analysis();
-        let decision = decide_infrastructure(&requirements, &analysis, "").await.unwrap();
+        let decision = decide_infrastructure(&requirements, &analysis, "", "https://github.com/Arvo-AI/hello_world/tree/main").await.unwrap();
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         let result = rt.block_on(provision_infrastructure(
@@ -669,5 +706,106 @@ mod tests {
         // Test serverless
         let serverless = determine_instance_type(&DeploymentType::Serverless, &CloudProvider::AWS);
         assert_eq!(serverless, "lambda");
+    }
+}
+
+fn escape_hcl_string(s: &str) -> String {
+    s.replace('\\', "\\\\")
+     .replace('"', "\\\"")
+     .replace('\n', "\\n")
+     .replace('\r', "\\r")
+     .replace('\t', "\\t")
+}
+
+fn json_to_hcl(key: &str, value: &serde_json::Value, indent_level: usize) -> String {
+    let indent = "  ".repeat(indent_level);
+    
+    match value {
+        serde_json::Value::String(s) => {
+            // Don't quote if it's a Terraform variable reference
+            if s.starts_with("var.") || s.starts_with("${") {
+                format!("{} = {}", key, s)
+            } else {
+                // Properly escape the string for HCL
+                let escaped = escape_hcl_string(s);
+                format!("{} = \"{}\"", key, escaped)
+            }
+        }
+        serde_json::Value::Number(n) => {
+            format!("{} = {}", key, n)
+        }
+        serde_json::Value::Bool(b) => {
+            format!("{} = {}", key, b)
+        }
+        serde_json::Value::Array(arr) => {
+            if arr.is_empty() {
+                format!("{} = []", key)
+            } else if arr.iter().all(|v| v.is_string()) {
+                // Simple string array
+                let items: Vec<String> = arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(|s| format!("\"{}\"", escape_hcl_string(s)))
+                    .collect();
+                format!("{} = [{}]", key, items.join(", "))
+            } else {
+                // Complex array - format as multiple blocks
+                let mut result = String::new();
+                for item in arr {
+                    if let serde_json::Value::Object(obj) = item {
+                        result.push_str(&format!("{} {{\n", key));
+                        for (subkey, subvalue) in obj {
+                            result.push_str(&format!("{}  {}\n", indent, json_to_hcl(subkey, subvalue, indent_level + 1)));
+                        }
+                        result.push_str(&format!("{}}}\n", indent));
+                    }
+                }
+                result.trim_end().to_string()
+            }
+        }
+        serde_json::Value::Object(obj) => {
+            // Handle as a block
+            let mut result = format!("{} {{\n", key);
+            for (subkey, subvalue) in obj {
+                result.push_str(&format!("{}  {}\n", indent, json_to_hcl(subkey, subvalue, indent_level + 1)));
+            }
+            result.push_str(&format!("{}}}", indent));
+            result
+        }
+        serde_json::Value::Null => {
+            format!("{} = null", key)
+        }
+    }
+}
+
+/// Add sed commands to startup scripts to replace localhost with 0.0.0.0 after git clone
+fn replace_git_clone_with_download(script: &serde_json::Value, _download_url: &str) -> serde_json::Value {
+    if let serde_json::Value::String(script_str) = script {
+        let mut modified_script = script_str.clone();
+        
+        // If script contains git clone, add localhost replacement commands after it
+        if script_str.contains("git clone") {
+            // Add comprehensive sed commands to replace localhost references in all relevant files
+            let sed_commands = " && find . -name '*.py' -exec sed -i 's/127\\.0\\.0\\.1/0.0.0.0/g' {} \\; && find . -name '*.py' -exec sed -i 's/localhost/0.0.0.0/g' {} \\; && find . -name '*.html' -exec sed -i 's/http:\\/\\/localhost:5000//g' {} \\; && find . -name '*.js' -exec sed -i 's/http:\\/\\/localhost:5000//g' {} \\; && find . -name '*.ts' -exec sed -i 's/http:\\/\\/localhost:5000//g' {} \\;";
+            
+            // Insert sed commands after any git clone and cd commands
+            if let Some(pos) = script_str.rfind(" && cd ") {
+                // Find the end of the cd command (next && or end of string)
+                let after_cd = &script_str[pos + 6..]; // Skip " && cd "
+                if let Some(next_and) = after_cd.find(" && ") {
+                    let insert_pos = pos + 6 + next_and;
+                    modified_script.insert_str(insert_pos, sed_commands);
+                } else {
+                    // cd is at the end, append sed commands
+                    modified_script.push_str(sed_commands);
+                }
+            } else if script_str.contains("git clone") {
+                // No cd command, just append sed commands at the end
+                modified_script.push_str(sed_commands);
+            }
+        }
+        
+        serde_json::Value::String(modified_script)
+    } else {
+        script.clone()
     }
 }

@@ -1,5 +1,6 @@
 use anyhow::{Result, anyhow};
 use log::{info, warn, error};
+use regex::Regex;
 use std::io::{self, Write};
 use std::fs;
 use std::path::Path;
@@ -41,7 +42,6 @@ pub async fn deploy_application(
 
     // Check credentials for non-dry-run deployments
     if !dry_run || force_deploy {
-        info!("🔐 Checking credentials for {:?}...", requirements.cloud_provider);
         let credentials = CloudCredentials::load_from_file()
             .unwrap_or_else(|_| CloudCredentials::new());
         
@@ -69,6 +69,16 @@ pub async fn deploy_application(
     info!("📥 Cloning repository: {}", repository);
     let temp_repo = clone_repository(repository).await?;
     
+    // Get public IP first to replace localhost references before analysis
+    info!("🌐 Getting public IP for localhost replacement...");
+    let public_ip = get_public_ip().await.unwrap_or_else(|_| "0.0.0.0".to_string());
+    
+    if let Err(e) = replace_localhost_in_repository(temp_repo.path(), &public_ip) {
+        warn!("⚠️ Failed to replace localhost references: {}", e);
+    } else {
+        info!("✅ Successfully updated localhost references in repository files");
+    }
+    
     info!("🔍 Analyzing repository structure...");
     let analysis = analyze_repository(temp_repo.path())?;
     
@@ -79,10 +89,9 @@ pub async fn deploy_application(
     
     // Make infrastructure decision
     info!("🏗️ Determining optimal infrastructure using AI...");
-    let infrastructure_decision = decide_infrastructure(&requirements, &analysis, description).await?;
+    let infrastructure_decision = decide_infrastructure(&requirements, &analysis, description, repository).await?;
     
     info!("Infrastructure decision: {:?}", infrastructure_decision.deployment_type);
-    info!("Estimated cost: ${:.2}/month", infrastructure_decision.estimated_cost);
     info!("Justification: {}", infrastructure_decision.justification);
     
     // Generate Terraform files (even for dry-run to allow review)
@@ -106,31 +115,21 @@ pub async fn deploy_application(
         });
     }
     
-    // Provision infrastructure
+    // Provision infrastructure (sed will handle localhost replacement in startup script)
     info!("☁️ Provisioning infrastructure...");
     let work_dir = tempfile::tempdir()?;
     let mut deployment_result = provision_infrastructure(
         &infrastructure_decision,
-        repository,
+        repository, // Use original repository - sed will fix localhost in startup script
         work_dir.path(),
-        false, // Actually deploy
+        false, // Actually deploy  
         &requirements.cloud_provider,
     ).await?;
     
-    // Replace localhost with actual IP in the deployment result
+    // Fix URL if it contains "unknown" 
     if let Some(public_ip) = &deployment_result.public_ip {
         if deployment_result.url.contains("unknown") {
             deployment_result.url = format!("http://{}:5000", public_ip);
-        }
-        
-        // Clone repository again and replace localhost references
-        info!("📥 Re-cloning repository to update localhost references...");
-        if let Ok(temp_repo) = clone_repository(repository).await {
-            if let Err(e) = replace_localhost_in_repository(temp_repo.path(), public_ip) {
-                warn!("⚠️ Failed to replace localhost references: {}", e);
-            } else {
-                info!("✅ Successfully updated localhost references in repository files");
-            }
         }
     }
     
@@ -281,7 +280,7 @@ async fn deploy_with_chat(
     let requirements = ai_nlp::parse_deployment_requirements(description).await?;
     
     println!("🏗️ Planning infrastructure using AI...");
-    let decision = decide_infrastructure(&requirements, analysis, description).await?;
+    let decision = decide_infrastructure(&requirements, analysis, description, "https://github.com/Arvo-AI/hello_world/tree/main").await?;
     
     print_deployment_plan(&decision);
     
@@ -304,7 +303,7 @@ async fn deploy_with_chat(
 
 async fn plan_deployment(description: &str, analysis: &RepositoryAnalysis) -> Result<InfrastructureDecision> {
     let requirements = ai_nlp::parse_deployment_requirements(description).await?;
-    let decision = decide_infrastructure(&requirements, analysis, description).await?;
+    let decision = decide_infrastructure(&requirements, analysis, description, "https://github.com/Arvo-AI/hello_world/tree/main").await?;
     Ok(decision)
 }
 
@@ -368,6 +367,13 @@ fn print_deployment_plan(decision: &InfrastructureDecision) {
     }
 }
 
+/// Get the public IP address of the current machine
+async fn get_public_ip() -> Result<String> {
+    let response = reqwest::get("https://api.ipify.org?format=text").await?;
+    let ip = response.text().await?;
+    Ok(ip.trim().to_string())
+}
+
 /// Replace localhost references in repository files with the actual public IP
 fn replace_localhost_in_repository(repo_path: &Path, public_ip: &str) -> Result<()> {
     info!("🔄 Replacing localhost references with {} in repository files", public_ip);
@@ -399,27 +405,48 @@ fn replace_localhost_in_file(file_path: &Path, public_ip: &str) -> Result<()> {
     if let Ok(content) = fs::read_to_string(file_path) {
         let original_content = content.clone();
         
-        // Replace various localhost patterns
-        let mut modified_content = content
-            .replace("localhost", public_ip)
-            .replace("127.0.0.1", public_ip)
-            .replace("0.0.0.0", public_ip); // Be careful with this one
+        let mut modified_content = content.clone();
         
-        // For Flask specifically, ensure app.run() uses the public IP
+        // For Flask specifically, ensure app.run() uses 0.0.0.0 for external access
         if file_path.extension().map_or(false, |ext| ext == "py") {
-            // Replace app.run() calls to bind to 0.0.0.0 instead of localhost
+            // Use regex to replace Flask host parameters more robustly BEFORE general localhost replacement
+            
+            // Replace app.run() with no host specified
             modified_content = modified_content
-                .replace("app.run()", "app.run(host='0.0.0.0', port=5000)")
-                .replace("app.run(host='localhost'", "app.run(host='0.0.0.0'")
-                .replace("app.run(host=\"localhost\"", "app.run(host=\"0.0.0.0\"");
+                .replace("app.run()", "app.run(host='0.0.0.0', port=5000)");
+            
+            // Replace localhost host parameters (with and without quotes)
+            let localhost_patterns = [
+                (r#"host\s*=\s*"localhost""#, r#"host="0.0.0.0""#),
+                (r#"host\s*=\s*'localhost'"#, r#"host='0.0.0.0'"#),
+                (r#"host\s*=\s*"127\.0\.0\.1""#, r#"host="0.0.0.0""#),
+                (r#"host\s*=\s*'127\.0\.0\.1'"#, r#"host='0.0.0.0'"#),
+            ];
+            
+            for (pattern, replacement) in localhost_patterns {
+                if let Ok(re) = Regex::new(pattern) {
+                    modified_content = re.replace_all(&modified_content, replacement).to_string();
+                }
+            }
+            
+            // Now replace remaining localhost references with public IP (for frontend API calls, etc.)
+            modified_content = modified_content
+                .replace("localhost", public_ip)
+                .replace("127.0.0.1", public_ip);
+        } else {
+            // For non-Python files (HTML, JS, etc.), replace localhost with public IP
+            modified_content = modified_content
+                .replace("localhost", public_ip)
+                .replace("127.0.0.1", public_ip)
+                .replace("0.0.0.0", public_ip);
         }
         
         // Only write if content changed
         if modified_content != original_content {
             fs::write(file_path, modified_content)?;
-            info!("✅ Updated localhost references in: {}", file_path.display());
         }
     }
     
     Ok(())
 }
+
