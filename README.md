@@ -25,9 +25,9 @@ A Rust-based command-line tool that automates application deployment based on na
 ### Build from Source
 
 ```bash
-git clone <repository-url>
-cd autodeployment-system
-cargo build --release
+   git clone <repository-url>
+   cd autodeployment-system
+   cargo build --release
 ```
 
 ### Setup
@@ -36,6 +36,18 @@ cargo build --release
    ```bash
    # Edit .env and add your Google Gemini API key
    ```
+   
+Required:
+- `GEMINI_API_KEY`: Google Gemini API key for AI-powered natural language processing
+
+Optional:
+- `RUST_LOG`: Set logging level (`debug`, `info`, `warn`, `error`)
+
+Example `.env` file:
+```env
+GEMINI_API_KEY=your_gemini_api_key_here
+RUST_LOG=info
+```
 
 2. **Configure cloud platform credentials** (choose your cloud provider):
    ```bash
@@ -54,7 +66,7 @@ cargo build --release
    cargo run -- credentials status
    ```
 
-## 📖 Usage
+## Usage
 
 ### Command Line Interface
 
@@ -65,30 +77,7 @@ Deploy an application with a single command:
 cargo run -- deploy \
   --description "Deploy this Flask application on GCP" \
   --repository "https://github.com/Arvo-AI/hello_world"
-
-# Can also specify cloud provider
-cargo run -- deploy \
-  --description "Deploy this Flask application on GCP" \
-  --repository "https://github.com/Arvo-AI/hello_world" \
-  --cloud-provider "gcp"
-```
-
-### Credential Management
-
-Manage cloud platform credentials securely:
-
-```bash
-# Set up credentials for specific cloud providers
-cargo run -- credentials setup aws
-cargo run -- credentials setup gcp
-cargo run -- credentials setup azure
-
-# Check which credentials are configured
-cargo run -- credentials status
-
-# Clear credentials (single provider or all)
-cargo run -- credentials clear aws
-cargo run -- credentials clear all
+  --cloud-provider "gcp" 
 ```
 
 ### Interactive Chat Mode
@@ -164,45 +153,6 @@ The system provides cost estimates for different deployment options:
 - **Serverless**: ~$5/month (usage-based)
 - **Static Site**: ~$1/month
 
-## 🔧 Configuration
-
-### Environment Variables
-
-Environment variables are loaded from a `.env` file in the project root:
-
-Required:
-- `GEMINI_API_KEY`: Google Gemini API key for AI-powered natural language processing
-
-Optional:
-- `RUST_LOG`: Set logging level (`debug`, `info`, `warn`, `error`)
-
-Example `.env` file:
-```env
-GEMINI_API_KEY=your_gemini_api_key_here
-RUST_LOG=info
-```
-
-### Cloud Platform Credentials
-
-The system supports three cloud platforms with secure credential storage:
-
-#### AWS Credentials
-- Access Key ID
-- Secret Access Key
-- Region (default: us-east-1)
-- Session Token (optional)
-
-#### Google Cloud Platform
-- Service Account JSON key file
-- Project ID
-- Region (default: us-central1)
-
-#### Microsoft Azure
-- Client ID (Application ID)
-- Client Secret
-- Tenant ID (Directory ID)
-- Subscription ID
-
 ### Terraform Output
 
 Generated Terraform files are saved to:
@@ -222,7 +172,7 @@ Generated Terraform files are saved to:
 
 ## Dependencies and Sources
 
-### Rust Crates Used
+### Crates 
 - **clap**: Command-line argument parsing
 - **tokio**: Async runtime
 - **reqwest**: HTTP client for AI API calls
@@ -239,15 +189,6 @@ Generated Terraform files are saved to:
 ### External Tools
 - **Git**: Repository cloning
 - **Terraform**: Infrastructure provisioning
-- **Claude Code**: Terraform and gcloud debugging, README.md gen
-
-### References
-- [Google Gemini API Documentation](https://ai.google.dev/docs)
-- [Terraform AWS Provider Documentation](https://registry.terraform.io/providers/hashicorp/aws/latest/docs)
-- [Terraform GCP Provider Documentation](https://registry.terraform.io/providers/hashicorp/google/latest/docs)
-- [Terraform Azure Provider Documentation](https://registry.terraform.io/providers/hashicorp/azurerm/latest/docs)
-- [AWS Pricing Calculator](https://calculator.aws/)
-- [Rust Documentation](https://doc.rust-lang.org/)
 
 ## License
 
